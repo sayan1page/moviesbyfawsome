@@ -1,0 +1,5 @@
+db=report
+collection=node_rec
+host=127.0.0.1
+usr=sayan
+pswd=sayan123

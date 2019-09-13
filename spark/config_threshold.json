@@ -1,0 +1,4 @@
+{"channel" : "all", "threshold" : 0.5 }
+{"channel" : "236", "threshold" : 0.2}
+{"channel" : "922", "threshold" : 0.6}
+

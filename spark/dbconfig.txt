@@ -1,0 +1,4 @@
+hostname 54.209.71.100
+username hadoop
+passwd sayan123
+dbname model

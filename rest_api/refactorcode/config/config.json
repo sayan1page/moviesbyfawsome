@@ -1,0 +1,35 @@
+{
+"all" : {
+        "block_categories" : [916105,1011724,1011726,1011727],
+        "no_of_category" : 8,
+        "no_of_node" : 40,
+        "no_of_match" : 2,
+        "favourite_weight" : 0.5,
+        "default_category" : [10037913,10037914,10053952],
+        "conditional_block_categories" : {
+                 "rule" : [
+                       {"if": {
+                                "categories" : [10244361],
+                                 "relation" : "or"
+                        },
+                        "then" : {
+                                "categories" : [10244361,10057506],
+                                "relation" : "or",
+                                "blockOrallow" : false
+                        }}]
+        },
+        "category_weightedge":{
+                    "rule" :[
+                               {
+                                "origin" : "Identifier",
+                                "weight" : 0.5
+                                },
+                                {
+                                "origin" : "previousnode",
+                                "weight" : 0.5
+                               }]
+        }
+},
+
+"250":{}
+}

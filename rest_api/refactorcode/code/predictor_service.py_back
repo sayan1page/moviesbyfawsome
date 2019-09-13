@@ -1,0 +1,628 @@
+from __future__ import division
+import pandas as pd
+import falcon
+from falcon_cors import CORS
+import json
+from concurrent.futures import *
+import MySQLdb
+import pymongo
+from pymongo import MongoClient
+import collections
+import random
+from collections import OrderedDict
+import sys
+import yaml
+import traceback
+
+
+class MysqlDbWrapper(object):
+    connection = None
+    cursor = None
+    
+    def __init__(self, configpath):
+        f = open(configpath)
+        config = {}
+        for line in f:
+            fields = line.strip().split(' ')
+            config[fields[0]] = fields[1].strip()
+        f.close()
+        self.connection = MySQLdb.connect (host = config['hostname'], user = config['username'], passwd = config['passwd'], db = config['dbname'])
+        self.cursor = self.connection.cursor()
+    
+    def close_mysql(self):
+        self.cursor.close()
+        self.connection.close()
+
+    def get_data(self, query):
+        self.cursor.execute(query)
+        return self.cursor.fetchall()
+
+class MongoDbWrapper(object):
+    collection = None
+    client = None
+    db = None
+
+    def __init__(self,configpath):
+        f = open(configpath)
+        mongoconfig = {}
+        for line in f:
+            fields = line.strip().split('=')
+            mongoconfig[fields[0]] = fields[1].strip()
+        f.close()
+        self.client = MongoClient('mongodb://'+mongoconfig['usr']+':'+ mongoconfig['pswd']+'@'+mongoconfig['host']+'/'+mongoconfig['db'])
+        self.db = self.client[mongoconfig['db']]
+        self.collection = self.db[mongoconfig['collection']]
+
+    def close_mongo(self):
+        self.client.close()
+
+    def get_data(self):
+        return self.collection.find({"_type" : "node", "status":1})
+
+           
+class MysqlUtility(object):
+    mysql_instance = None
+
+    def __init__(self, configpath):
+        self.mysql_instance = MysqlDbWrapper(configpath)
+
+    def load_score(self):
+        scores = {}
+        data = self.mysql_instance.get_data("select * from category_score")
+        for row in data:
+            feature_name= row[1].strip()
+            provider = row[0].strip()
+            feature_value = row[2].strip()
+            score = row[4]/row[3]
+            #print feature_name, feature_value, provider, score
+            if feature_name not in scores:
+                temp ={}
+                temp[provider] = score
+                temp1 = {}
+                temp1[feature_value] = temp
+                scores[feature_name] = temp1
+            else:
+                temp1 = scores[feature_name]
+                if feature_value not in temp1:
+                    temp ={}
+                    temp[provider] = score
+                    temp1[feature_value] = temp
+                    scores[feature_name] = temp1
+                else:
+                    temp = temp1[feature_value]
+                    temp[provider] = score
+                    temp1[feature_value] = temp 
+                    scores[feature_name] = temp1
+        return scores
+
+    def load_popular_node(self):        
+        video_popular = {}
+        data = self.mysql_instance.get_data ("select * from node_popular_final")
+        total = 0
+        for row in data:
+            video_popular[row[0].strip()] = row[1]
+            total = total + row[1]
+        for k in video_popular:
+            video_popular[k] = video_popular[k] / total
+        return video_popular
+
+    def load_context_map(self):
+        site_context_map = {}
+        data = self.mysql_instance.get_data("select iptv_site_id, iptv_search_type, iptv_search_id from ifood_iptv_sites")
+        for row in data:
+            channel = row[0]
+            context_id = row[2]
+            context_type = row[1]
+            if (context_id is not None) and (context_type is not None):
+                site_context_map[channel] = [context_type, context_id.split(',')]
+        return site_context_map
+
+
+    def shutdown(self):
+        self.mysql_instance.close_mysql()
+
+class GeneralUtility(object):
+
+    def get_valid_categories(self, filepath):
+        categories = pd.read_csv(filepath, names=['Category','id'])
+        return categories.id.tolist()
+
+    def load_default_category(self, categories):
+        default_category = {}
+        for c in categories:
+            default_category[c] = 0
+        return default_category
+
+
+class MongoUtility(object):
+    mongo_instance = None
+    res = None
+    
+    def __init__(self, configpath):
+        self.mongo_instance = MongoDbWrapper(configpath)
+
+    def load_data(self):
+        self.res = self.mongo_instance.get_data()
+        #print self.res
+
+    def load_geo_restrictons(self):
+        self.load_data()
+        valid_all_geo = []
+        valid_us = []
+        valid_uk = []
+        valid_ca = []
+        valid_fr = []
+        valid_ge = []
+        valid_it = []
+        valid_au = []
+        valid_me = []
+        for r in self.res:
+            node = str(r['nid']).strip()
+            #print node
+            if 'c_all' in r:
+                if r['c_all'] == "1":
+                    valid_all_geo.append(node)
+            if 'c_us' in r:
+                if r['c_us'] == "1":
+                    valid_us.append(node)
+            if 'c_us' in r:
+                if r['c_uk'] == "1":
+                    valid_uk.append(node)
+            if 'c_ca' in r:
+                if r['c_ca'] == "1":
+                    valid_ca.append(node)
+            if 'c_fr' in r:
+                if r['c_fr'] == "1":
+                    valid_fr.append(node)
+            if 'c_ge' in r:
+                if r['c_ge'] == "1":
+                    valid_ge.append(node)
+            if 'c_it' in r:
+                if r['c_it'] == "1":
+                    valid_it.append(node)
+            if 'c_au' in r:
+                if r['c_au'] == "1":
+                    valid_au.append(node)
+            if 'c_me' in r:
+                if r['c_me'] == "1":
+                    valid_me.append(node)
+        return valid_all_geo, valid_us, valid_uk, valid_ca, valid_fr, valid_ge, valid_it, valid_au, valid_me
+
+    def load_mapping(self):
+        self.load_data()
+        category_map = {}
+        uid_map = {}
+        reverse_category_map = {}
+
+        for r in self.res:
+            node = str(r['nid']).strip()
+            #print node
+            if 'field_node_index' in r:
+                if r['field_node_index'] is not None:
+                    r1 = r['field_node_index']
+                    for r2 in r1:
+                        if  r2['target_id'] is not None:
+                            categories = r2['target_id']
+                            if isinstance(categories, collections.Iterable):
+                                for c in categories:
+                                    #print c, node
+                                    if c in category_map:
+                                        if node not in  category_map[c]:
+                                            category_map[c].append(node)
+                                    else:
+                                        temp = []
+                                        temp.append(node)
+                                        category_map[c] = temp
+                            else:
+                                c = categories
+                                #print c, node
+                                if c in category_map:
+                                    if node not in category_map[c]:
+                                        category_map[c].append(node)
+                                else:
+                                    temp = []
+                                    temp.append(node)
+                                    category_map[c] = temp
+            if 'uid' in r:
+                uids = r['uid']
+                if isinstance(uids, collections.Iterable):
+                    for u in uids:
+                        if u in uid_map:
+                            if node not in  uid_map[u]:
+                                uid_map[u].append(node)
+                        else:
+                            temp = []
+                            temp.append(node)
+                            uid_map[u] = temp
+                else:
+                    u = uids
+                    if u in uid_map:
+                        if node not in  uid_map[u]:
+                            uid_map[u].append(node)
+                    else:
+                        temp = []
+                        temp.append(node)
+                        uid_map[u] = temp
+        for c in category_map:
+            videos = category_map[c]
+            for v in videos:
+                if v in reverse_category_map:
+                    reverse_category_map[v].append(c)
+                else:
+                    temp = []
+                    temp.append(c)
+                    reverse_category_map[v] = temp
+        return category_map, uid_map, reverse_category_map
+
+    def shutdown(self):
+        self.mongo_instance.close_mongo()
+
+
+class CategoryLayer(object):
+
+    def get_category(self, feature_value, feature_name, rules, default_category, reverse_category_map, scores,prevNode):
+        feature_name = feature_name.encode('ascii','ignore').strip()
+        if feature_name == "prevNode":
+            feature_value = prevNode
+        feature_value = feature_value.encode('ascii','ignore').strip()
+        res = {}
+        found = False
+        if feature_name in scores:
+            temp = scores[feature_name]
+            if feature_value in temp:
+                res = temp[feature_value]
+                found = True
+            else:
+                res = default_category
+        else:
+            res = default_category
+
+        for rule in rules:
+            if rule["origin"] == feature_name:
+                if found:
+                    for c in res:
+                        res[c] = res[c] + rule["weight"]
+                if feature_name == "prevNode":
+                    if feature_value in  reverse_category_map:
+                        categories = reverse_category_map[feature_value]
+                        for c in categories:
+                            if str(c) not in res:
+                                res[str(c)] = rule["weight"]
+                            else:
+                                res[str(c)] = res[str(c)] + rule["weight"]
+        return res
+
+    def get_refined_category(self, feature_value, feature_name, rules, default_category, reverse_category_map, valid_category, no_of_category, scores, prevNode, debug):
+        res = self.get_category(feature_value, feature_name, rules, default_category, reverse_category_map, scores, prevNode)
+        res_final = {}
+        for c in res:
+            if str(c) in valid_category:
+                if len(res_final) == no_of_category:
+                    return res_final
+                res_final[c] = res[c]
+        if not res_final:
+            res_final = default_category
+
+        if len(res_final) < no_of_category:
+            for c in default_category:
+                if c not in res_final:
+                    res_final[c] = 0
+
+        #if debug:
+         #   print "Category returned for ", feature_name
+          #  print res_final
+        return res_final
+
+
+class VideoLayer(object):
+
+    def is_valid(self, categories1, v, reverse_category_map, valid_category, no_of_match):
+        if no_of_match == 0:
+            return True
+        if str(v) not in reverse_category_map:
+            return False
+        video_categories =  reverse_category_map[str(v)]
+        video_categories1 = []
+
+        for c in video_categories:
+            if str(c) in valid_category:
+                video_categories1.append(c)
+        
+        if not categories1:
+            return True
+        if len(categories1) > 3:
+            if len(list(set(categories1) & set(video_categories1))) >= no_of_match:
+                return True
+            else:
+                return False
+        else:
+            if len(list(set(categories1) & set(video_categories1))) > 0:
+                return True
+            else:
+                return False
+
+
+    def get_video(self, valid_videos, c2, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, no_of_match, res_video,category_map, debug):
+        if res_video is None:
+            res_video = {}
+        c1 = int(c2)
+        count = 0
+        categories = []
+        if prevNode in  reverse_category_map:
+                for c in reverse_category_map[prevNode]:
+                    if str(c) in valid_category:
+                        categories.append(c)
+        popular_video = video_popular.keys()
+        popular_valid_common = []
+        if c1 in category_map:
+            videos = category_map[c1]
+            popular_valid_common = list(set(popular_video) & set(videos) & set(valid_videos))
+        else:
+            popular_valid_common = list(set(popular_video) & set(valid_videos))
+        
+        for v,p in sorted(video_popular.iteritems(), reverse=True, key=lambda (k,v): (v,k)):
+            if len(res_video.keys()) == no_of_node:
+                break
+            if (str(v) == prevNode) and (v not in popular_valid_common):
+                continue
+            if str(v) in reverse_category_map:
+                blocked = False
+                for b in block_categories:
+                    if b in reverse_category_map[str(v)]:
+                        blocked = True
+                        break
+                if blocked:
+                    continue    
+                if categories:
+                    if self.is_valid(categories,v, reverse_category_map, valid_category, no_of_match):
+                        if v in res_video:
+                            res_video[v] = res_video[v] + video_popular[v] + no_of_match*no_of_match
+                        else:
+                            res_video[v] = video_popular[v] + no_of_match*no_of_match
+                else:
+                    if v in res_video:
+                        res_video[v] = res_video[v] + video_popular[v]
+                    else:
+                        res_video[v] = video_popular[v]
+                
+                for rule in conditional_block_categories['rule']:
+                    if not rule["then"]["blockOrallow"]:
+                        if rule["if"]["relation"] == "or":
+                            allow = False
+                        else:
+                            allow = True
+                            for c in rule["if"]["categories"]:
+                                if prevNode in reverse_category_map:
+                                    if rule["if"]["relation"] == "or":
+                                        if c in reverse_category_map[prevNode]:
+                                            allow = True
+                                    else:
+                                        if c not in reverse_category_map[prevNode]:
+                                            allow = False
+                            if allow:
+                                for c in rule["then"]["categories"]:
+                                    if str(v) in reverse_category_map:
+                                        if rule["then"]["relation"] == "or":
+                                            if c in reverse_category_map[str(v)]:
+                                                allow = True
+                                        else:
+                                            if c not in reverse_category_map[str(v)]:
+                                                allow = False
+                            if allow:            
+                                continue
+                            else:
+                                if v in res_video:
+                                    del res_video[v]
+                    else:
+                        if rule["if"]["relation"] == "or":
+                            block = False
+                        else:
+                            block = True
+                            for c in rule["if"]["categories"]:
+                                if prevNode in reverse_category_map:
+                                    if rule["if"]["relation"] == "or":
+                                        if c in reverse_category_map[prevNode]:
+                                            block = True
+                                    else:
+                                        if c not in reverse_category_map[prevNode]:
+                                            block = False
+                            if block:
+                                for c in rule["then"]["categories"]:
+                                    if str(v) in reverse_category_map:
+                                        if rule["then"]["relation"] == "or":
+                                            if c in reverse_category_map[str(v)]:
+                                                block = True
+                                        else:
+                                            if c not in reverse_category_map[str(v)]:
+                                                block = False
+                            if not block:
+                                continue
+                            else:
+                                if v in res_video:
+                                    del res_video[v]
+        if debug:
+            print "Category ", c2
+            print "Video returned"
+            print res_video
+        return res_video
+
+                        
+    def get_video_wrapper(self, valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, no_of_match, category_map, debug):
+        res_video = self.get_video(valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, no_of_match, None,category_map, debug)
+        if res_video is None:
+            res_video = self.get_video(valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, 1, res_video, category_map, debug)
+        else:
+            if len(res_video.keys()) < no_of_node:
+                no_of_node = no_of_node - len(res_video.keys())
+                res_video = self.get_video(valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, 1, res_video, category_map, debug)
+        if res_video is None:
+            res_video = self.get_video(valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, 0, res_video, category_map, debug)
+        else:
+            if len(res_video.keys()) < no_of_node:
+                no_of_node = no_of_node - len(res_video.keys())
+                res_video = self.get_video(valid_videos, c, res, prevNode, reverse_category_map, valid_category, block_categories, video_popular, conditional_block_categories, no_of_node, 0, res_video, category_map, debug)
+
+        return res_video
+
+                                                
+class Predictor(object):
+    scores = {}
+    category_map = {}
+    uid_map = {}
+    site_context_map = {}
+    reverse_category_map = {}
+    video_popular = {}
+    valid_category =[]
+    valid_all_geo = []
+    valid_us = []
+    valid_uk = []
+    valid_ca = []
+    valid_fr = []
+    valid_ge = []
+    valid_it = []
+    valid_me = []
+    valid_au = []
+    config = {}
+    debug = True
+    def __init__(self, debug):
+        with open('../config/config.json') as f:
+            self.config = yaml.safe_load(f)
+        f.close()
+        mysql_utility = MysqlUtility('../config/dbconfig.txt')
+        self.scores = mysql_utility.load_score()
+        self.video_popular = mysql_utility.load_popular_node()
+        self.site_context_map = mysql_utility.load_context_map()
+        mysql_utility.shutdown()
+        
+        mongo_utility = MongoUtility('../config/mongoconfig.txt')
+        self.valid_all_geo, self.valid_us, self.valid_uk, self.valid_ca, self.valid_fr, self.valid_ge, self.valid_it, self.valid_au, self.valid_me = mongo_utility.load_geo_restrictons()
+        self.category_map, self.uid_map, self.reverse_category_map = mongo_utility.load_mapping()
+        mongo_utility.shutdown()
+        
+        self.valid_category = GeneralUtility().get_valid_categories('../data/categories.csv')
+        self.debug = debug
+           
+    
+    def on_get(self, req, resp):
+        mysql_utility = mysqlutility('../config/dbconfig.txt')
+        self.scores = mysql_utility.load_score()
+        self.video_popular = mysql_utility.load_popular_node()
+        mysql_utility.shutdown()
+    
+
+    def on_post(self, req, resp):
+        try:        
+            res_final = {}
+            input_json = json.loads(req.stream.read(),encoding='utf-8')
+            local_config = {}
+            chid = int(input_json['channel_id'].encode('ascii','ignore'))
+            if str(chid) in self.config.keys():
+                local_config = self.config[str(chid)]
+            else:
+                local_config = self.config["all"]
+            
+            default_category = GeneralUtility().load_default_category(local_config["default_category"])
+            if 'prevNode' not in input_json:
+                input_json['prevNode'] = ["000"]
+
+            if 'prevNode' in input_json:
+                nodes = input_json['prevNode']
+                #print nodes
+                for prevNode in nodes:               
+                    #print "#######################", prevNode
+                    prevNode = str(prevNode)  #.encode('ascii','ignore').strip()
+                    valid_videos = []
+                    if chid in self.site_context_map:
+                        context_type, context_ids = self.site_context_map[chid]
+                        if 'nodeid' in context_type:
+                            for c in context_ids:
+                                if int(c) in self.category_map:
+                                    valid_videos = valid_videos + self.category_map[int(c)]
+                        else:
+                            for c in context_ids:
+                                if int(c) in self.uid_map:
+                                    valid_videos = valid_videos +  self.uid_map[int(c)]
+                    valid_geo = self.valid_all_geo
+                    if 'country' in input_json:
+                        country = input_json['country']
+                        if country == 'United States':
+                            valid_geo = valid_geo + self.valid_us
+                        if country == 'United Kingdom':
+                            valid_geo = valid_geo + self.valid_uk
+                        if country == 'Australia':
+                            valid_geo = valid_geo + self.valid_au
+                        if country == 'Italy':
+                            valid_geo = valid_geo + self.valid_it
+                        if country == 'Mexico':
+                            valid_geo = valid_geo + self.valid_me
+                        if country == 'Canada':
+                            valid_geo = valid_geo + self.valid_ca
+                        if country == 'France':
+                            valid_geo = valid_geo + self.valid_fr
+                        if country == 'Germany':
+                            valid_geo = valid_geo + self.valid_ge
+                    valid_videos = list(set(valid_videos) & set(valid_geo))
+
+                    res = {}                
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        future_array = { pool.submit(CategoryLayer().get_refined_category,input_json[f],f,local_config["category_weightedge"]["rule"], default_category, self.reverse_category_map, self.valid_category, local_config["no_of_category"], self.scores, prevNode, self.debug) : f for f in input_json }
+                        for future in as_completed(future_array):
+                            temp = future.result()
+                            if temp is not None:
+                                for k in temp:
+                                    if k not in res:
+                                        res[k] = temp[k]
+                                    else:
+                                        res[k] = res[k] + temp[k]
+                    pool.shutdown(wait=True)
+                    if self.debug:
+                        print res
+            
+                    res_video = {}
+
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        future_array = { pool.submit(VideoLayer().get_video_wrapper, valid_videos, c, res, prevNode, self.reverse_category_map, self.valid_category, local_config["block_categories"], self.video_popular, local_config["conditional_block_categories"], local_config["no_of_node"], local_config["no_of_match"],self.category_map, self.debug) : c for c in res.keys() }
+                        for future in as_completed(future_array):
+                            temp = future.result()
+                            if temp is not None:
+                                for v in temp:
+                                    if v in res_video:
+                                        res_video[v] = res_video[v] + temp[v]
+                                    else:
+                                        res_video[v] = temp[v]
+                    pool.shutdown(wait=True)
+            
+                    res = {}
+                    for i in range(len(list(res_video.items()))):
+                        if len(list(res.items())) == local_config["no_of_node"] -10:
+                            break
+                        v,s = random.choice(list(res_video.items()))
+                        while v in res:
+                            v,s = random.choice(list(res_video.items()))
+                        res[v] = s
+
+                    res_final[prevNode] = res
+            if self.debug:
+                print input_json
+                print res_final
+            resp.status = falcon.HTTP_200
+            resp.body = str(json.dumps(OrderedDict(sorted(res_final.iteritems(), reverse=True,key=lambda (k,v): (v,k))))).encode('ascii','ignore').replace("'", '"') 
+        except Exception,e:
+            resp.status = falcon.HTTP_500
+            resp.body = ""
+            if self.debug:
+                print input_json
+                print e 
+                print traceback.format_exc()
+    
+cors = CORS(allow_all_origins=True,allow_all_methods=True,allow_all_headers=True) 
+wsgi_app = api = falcon.API(middleware=[cors.middleware])
+debug = False
+if "debug" in sys.argv:
+    debug = True
+p = Predictor(True)
+url = '/predict/'
+api.add_route(url, p)
+
+        
+            
